@@ -31,4 +31,46 @@ jobs:
       HEIGHT: "3600"
       DPR: "3"
       URL: ${{ github.event.inputs.url || 'http://154.48.226.95:802/#/' }}
-      COUNTRIES: ${{ github.event.inputs.cou
+      COUNTRIES: ${{ github.event.inputs.countries || 'US,UK,DE,FR,IT,ES,CA,JP' }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y zip
+          npm ci || npm i
+          npx playwright install --with-deps chromium
+
+      - name: Run screenshots (grid)
+        run: |
+          rm -rf grid_all
+          node ./multi_country_grid_4x5_v4.mjs "$URL" "grid_all"
+          rm -f grid_all_latest.zip
+          zip -r grid_all_latest.zip grid_all
+
+      # 1) 仍然保留 Actions artifact（给你自己快速拿）
+      - name: Upload Actions artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: grid_all_latest
+          path: grid_all_latest.zip
+          if-no-files-found: error
+
+      # 2) 发布到 Release，供同事免登录下载（仓库需 Public）
+      - name: Create/Update Release (latest)
+        uses: ncipollo/release-action@v1
+        with:
+          tag: latest
+          name: Latest build
+          allowUpdates: true
+          replacesArtifacts: true
+          artifacts: "grid_all_latest.zip"
+          token: ${{ secrets.GITHUB_TOKEN }}
