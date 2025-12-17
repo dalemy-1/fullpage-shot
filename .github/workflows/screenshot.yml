@@ -42,8 +42,15 @@ jobs:
         run: |
           npm i
           npx playwright install --with-deps chromium
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y zip
+          npm i
+          npx playwright install --with-deps chromium
 
-            - name: Run screenshots
+
+      - name: Run screenshots
         run: |
           node ./multi_country_grid_4x5_v3.mjs "$URL" "grid_all_v3"
           rm -f grid_all_v3.zip
