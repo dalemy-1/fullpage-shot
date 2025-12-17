@@ -45,7 +45,8 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y zip
+          # zip + 中文字体（关键）+ 常用字体
+          sudo apt-get install -y --no-install-recommends zip fonts-noto-cjk fonts-noto-color-emoji
           npm ci || npm i
           npx playwright install --with-deps chromium
 
@@ -56,7 +57,7 @@ jobs:
           rm -f grid_all_latest.zip
           zip -r grid_all_latest.zip grid_all
 
-      # 1) 仍然保留 Actions artifact（给你自己快速拿）
+      # 1) Actions artifact（你自己拿）
       - name: Upload Actions artifact
         uses: actions/upload-artifact@v4
         with:
@@ -64,7 +65,7 @@ jobs:
           path: grid_all_latest.zip
           if-no-files-found: error
 
-      # 2) 发布到 Release，供同事免登录下载（仓库需 Public）
+      # 2) Release（同事免登录下载固定链接）
       - name: Create/Update Release (latest)
         uses: ncipollo/release-action@v1
         with:
