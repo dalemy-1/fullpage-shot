@@ -12,7 +12,7 @@ on:
         required: false
         default: "US,UK,DE,FR,IT,ES,CA,JP"
   schedule:
-    - cron: "0 2 * * *"
+  - cron: "0 * * * *"   # 每小时整点跑一次（UTC）
 
 permissions:
   contents: write
