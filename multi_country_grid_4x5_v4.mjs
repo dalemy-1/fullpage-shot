@@ -7,7 +7,7 @@ if (!url) {
   console.log('用法：node multi_country_grid_4x5_v4.mjs "<URL>" [输出目录]');
   process.exit(1);
 }
-const ROOT_OUT = (process.argv[3] || "grid_all_v4").trim();
+const ROOT_OUT = (process.argv[3] || "grid_all_v3").trim();
 if (!fs.existsSync(ROOT_OUT)) fs.mkdirSync(ROOT_OUT, { recursive: true });
 
 // 默认所有国家；可用环境变量覆盖：$env:COUNTRIES="UK,DE,FR"
@@ -19,7 +19,8 @@ const countries = (process.env.COUNTRIES || ALL_CODES.join(","))
 
 const WIDTH = Number(process.env.WIDTH || 1440);
 const BASE_HEIGHT = Number(process.env.HEIGHT || 3200);
-const DPR = Number(process.env.DPR || 3); // 建议 3 更清晰（2 也行）
+const DPR = Number(process.env.DPR || 2);
+
 const ITEM_SEL = ".product-item";
 const ROWS_PER_SHOT = 5;
 
@@ -58,7 +59,7 @@ async function removeStyle(marker) {
   }, marker);
 }
 
-// 强制 4 列布局（不影响商品标题）
+// 始终强制 4 列布局（不隐藏头尾，保证切国家按钮可点）
 await addStyle(
   "GRID_STYLE",
   `
@@ -72,61 +73,76 @@ await addStyle(
 `
 );
 
-// 只在截图阶段隐藏页头/页尾：注意：绝对不要隐藏 .title（商品标题就是 .title）
+// ---------- 截图时隐藏页头/页尾（只隐藏 fixed / sticky，避免误伤中文标题） ----------
 async function applyHideHeaderFooter() {
-  await addStyle(
-    "HIDE_HF",
-    `
-    /* 页尾 */
-    .van-tabbar { display: none !important; }
-
-    /* 页头/顶部模块：尽量只写“页面级容器”的选择器，避免误伤商品卡片内部 */
-    .home-page > .banner { display: none !important; }
-    .home-page > .search { display: none !important; }
-
-    /* 兜底：常见顶部导航（如果你的页面有） */
-    .van-nav-bar { display: none !important; }
-
-    /* 顶部隐藏后，去掉多余间距 */
-    .van-list { margin-top: 0 !important; }
-  `
-  );
-}
-async function clearHideHeaderFooter() {
-  await removeStyle("HIDE_HF");
-}
-
-// ---------- 公共等待：fonts + 指定商品范围内图片加载完成 ----------
-async function waitFontsAndImages(start, endExclusive) {
-  await page.evaluate(async ({ sel, start, endExclusive }) => {
-    // fonts
-    try {
-      if (document.fonts && document.fonts.ready) await document.fonts.ready;
-    } catch {}
-
-    // images in [start, endExclusive)
-    const items = Array.from(document.querySelectorAll(sel)).slice(start, endExclusive);
-    const imgs = [];
-    for (const it of items) {
-      imgs.push(...Array.from(it.querySelectorAll("img")));
+  await page.evaluate(({ itemSel }) => {
+    // 先清理旧标记
+    for (const el of Array.from(document.querySelectorAll("[data-shot-hidden='1']"))) {
+      el.style.visibility = "";
+      el.style.display = "";
+      el.removeAttribute("data-shot-hidden");
     }
-    await Promise.all(
-      imgs.map(
-        (img) =>
-          img.complete && img.naturalWidth > 0
-            ? Promise.resolve()
-            : new Promise((resolve) => {
-                const done = () => {
-                  img.removeEventListener("load", done);
-                  img.removeEventListener("error", done);
-                  resolve();
-                };
-                img.addEventListener("load", done, { once: true });
-                img.addEventListener("error", done, { once: true });
-              })
-      )
-    );
-  }, { sel: ITEM_SEL, start, endExclusive });
+
+    const productAny = document.querySelector(itemSel);
+    const productRoot =
+      productAny?.closest(".product-list") ||
+      productAny?.parentElement ||
+      null;
+
+    function isVisible(el) {
+      if (!el) return false;
+      const st = getComputedStyle(el);
+      if (st.display === "none" || st.visibility === "hidden" || st.opacity === "0") return false;
+      const r = el.getBoundingClientRect();
+      return r.width > 0 && r.height > 0;
+    }
+
+    function insideProduct(el) {
+      if (!productRoot) return false;
+      return productRoot.contains(el);
+    }
+
+    let hidden = 0;
+
+    for (const el of Array.from(document.querySelectorAll("*"))) {
+      if (!(el instanceof HTMLElement)) continue;
+      if (!isVisible(el)) continue;
+
+      const st = getComputedStyle(el);
+      const pos = st.position;
+      if (pos !== "fixed" && pos !== "sticky") continue;
+
+      // 不隐藏商品区域内部的东西（避免误伤商品标题/中文行）
+      if (insideProduct(el)) continue;
+
+      const r = el.getBoundingClientRect();
+
+      // 过滤很小的元素（避免误伤小图标）
+      if (r.height < 40 || r.width < 200) continue;
+
+      // 常见：顶部/底部导航条、浮层遮罩等
+      el.setAttribute("data-shot-hidden", "1");
+      el.style.visibility = "hidden";
+      // 如果你遇到“仍然占位挡住商品”的情况，可以改成 display:none
+      // el.style.display = "none";
+      hidden += 1;
+    }
+
+    return hidden;
+  }, { itemSel: ITEM_SEL });
+
+  await page.waitForTimeout(400);
+}
+
+async function clearHideHeaderFooter() {
+  await page.evaluate(() => {
+    for (const el of Array.from(document.querySelectorAll("[data-shot-hidden='1']"))) {
+      el.style.visibility = "";
+      el.style.display = "";
+      el.removeAttribute("data-shot-hidden");
+    }
+  });
+  await page.waitForTimeout(200);
 }
 
 // ---------- 国家切换：打开 Location 弹窗并选择国家 ----------
@@ -142,7 +158,7 @@ async function openLocationModal() {
   await page.evaluate(() => window.scrollTo(0, 0));
   await page.waitForTimeout(500);
 
-  // 左上角找“US/UK/DE...”并点击
+  // 优先：在左上角区域找“US/UK/DE...”并点击（比坐标更稳）
   const clicked = await page.evaluate((codes) => {
     function isVisible(el) {
       if (!el) return false;
@@ -150,17 +166,20 @@ async function openLocationModal() {
       const st = getComputedStyle(el);
       return r.width > 0 && r.height > 0 && st.visibility !== "hidden" && st.display !== "none";
     }
+
     const candidates = [];
     for (const el of Array.from(document.querySelectorAll("*"))) {
       const t = (el.textContent || "").trim();
       if (!codes.includes(t)) continue;
       if (!isVisible(el)) continue;
+
       const r = el.getBoundingClientRect();
       if (r.left < 320 && r.top < 140 && r.right > 0 && r.bottom > 0) {
         candidates.push({ el, r });
       }
     }
-    candidates.sort((a, b) => a.r.top - b.r.top || a.r.left - b.r.left);
+
+    candidates.sort((a, b) => (a.r.top - b.r.top) || (a.r.left - b.r.left));
     if (candidates.length) {
       candidates[0].el.click();
       return true;
@@ -169,7 +188,7 @@ async function openLocationModal() {
   }, ALL_CODES);
 
   if (!clicked) {
-    // 兜底：左上角扫描点击
+    // 兜底：左上角扫描点击，直到弹窗出现
     for (let y = 20; y <= 110; y += 15) {
       for (let x = 20; x <= 240; x += 20) {
         await page.mouse.click(x, y).catch(() => {});
@@ -225,6 +244,7 @@ async function chooseCountryInModal(code) {
 }
 
 async function switchCountry(code) {
+  // 切换前保证页头不被隐藏（避免按钮点不到）
   await clearHideHeaderFooter();
   await page.evaluate(() => window.scrollTo(0, 0));
   await page.waitForTimeout(700);
@@ -276,7 +296,7 @@ async function ensureRendered(minCount) {
   return false;
 }
 
-// ---------- 行分组截图：每张最多 5 行；最后不足 5 行也只出一张 ----------
+// ---------- 计算截图区域：每张最多 5 行；最后不足 5 行也只出一张 ----------
 async function computeRowSegmentBox(startIndex) {
   return await page.evaluate(({ sel, start, rowsWanted }) => {
     const items = Array.from(document.querySelectorAll(sel));
@@ -321,4 +341,109 @@ async function computeRowSegmentBox(startIndex) {
 
     const pad = 10;
     left = Math.max(0, left - pad);
-    top = Math.ma
+    top = Math.max(0, top - pad);
+    right = right + pad;
+    bottom = bottom + pad;
+
+    return {
+      x: left,
+      y: top,
+      w: right - left,
+      h: bottom - top,
+      nextStart: lastIndex + 1,
+      takeRows,
+    };
+  }, { sel: ITEM_SEL, start: startIndex, rowsWanted: ROWS_PER_SHOT });
+}
+
+async function scrollSegmentToTop(seg) {
+  await page.evaluate((yy) => {
+    const target = window.scrollY + yy - 8;
+    window.scrollTo(0, Math.max(0, target));
+  }, seg.y);
+  await page.waitForTimeout(650);
+}
+
+async function captureCountry(code) {
+  const outDir = path.join(ROOT_OUT, code);
+  ensureDir(outDir);
+
+  // 截图前：只隐藏 fixed/sticky 的页头页尾（不会删中文）
+  await applyHideHeaderFooter();
+
+  // 尽量加载全量
+  await loadAllItemsBestEffort();
+  let total = await page.locator(ITEM_SEL).count();
+  console.log(`[${code}] 商品数量: ${total}`);
+  if (!total) {
+    await clearHideHeaderFooter();
+    return;
+  }
+
+  let start = 0;
+  let shotNo = 1;
+
+  while (start < total) {
+    await ensureRendered(start + 1);
+
+    await page.locator(ITEM_SEL).nth(start).scrollIntoViewIfNeeded();
+    await page.waitForTimeout(700);
+
+    let seg = await computeRowSegmentBox(start);
+    if (!seg) break;
+
+    await scrollSegmentToTop(seg);
+
+    seg = await computeRowSegmentBox(start);
+    if (!seg) break;
+
+    // 保证 clip 完全落在视口内（解决第 5 行截断）
+    const vp = page.viewportSize();
+    if (seg.y + seg.h > vp.height - 6) {
+      const needH = Math.min(9000, Math.ceil(seg.y + seg.h + 60));
+      await page.setViewportSize({ width: WIDTH, height: needH });
+      await page.waitForTimeout(300);
+
+      seg = await computeRowSegmentBox(start);
+      await scrollSegmentToTop(seg);
+      seg = await computeRowSegmentBox(start);
+    }
+
+    const outPath = path.join(outDir, `page_${String(shotNo).padStart(3, "0")}.png`);
+    await page.screenshot({
+      path: outPath,
+      clip: {
+        x: Math.max(0, Math.floor(seg.x)),
+        y: Math.max(0, Math.floor(seg.y)),
+        width: Math.max(1, Math.floor(seg.w)),
+        height: Math.max(1, Math.floor(seg.h)),
+      },
+    });
+
+    console.log(`[${code}] 输出: ${outPath}（行=${seg.takeRows}, start=${start} -> next=${seg.nextStart}）`);
+
+    start = seg.nextStart; // 最后不足 5 行也一次截完
+    shotNo += 1;
+
+    await page.setViewportSize({ width: WIDTH, height: BASE_HEIGHT });
+    await page.waitForTimeout(120);
+
+    total = await page.locator(ITEM_SEL).count();
+  }
+
+  // 恢复（给下一国家切换使用）
+  await clearHideHeaderFooter();
+  await page.setViewportSize({ width: WIDTH, height: BASE_HEIGHT });
+  await page.evaluate(() => window.scrollTo(0, 0));
+  await page.waitForTimeout(500);
+}
+
+// ---------- 主流程：逐国家切换 + 截图 ----------
+for (const code of countries) {
+  console.log(`\n=== 切换国家：${code} ===`);
+  await switchCountry(code);
+  await captureCountry(code);
+}
+
+await browser.close();
+console.log("\n全部完成。输出目录：", ROOT_OUT);
