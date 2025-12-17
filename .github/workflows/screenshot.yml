@@ -43,10 +43,11 @@ jobs:
           npm i
           npx playwright install --with-deps chromium
 
-      - name: Run screenshots
+            - name: Run screenshots
         run: |
           node ./multi_country_grid_4x5_v3.mjs "$URL" "grid_all_v3"
-          tar -czf grid_all_v3.tar.gz grid_all_v3
+          rm -f grid_all_v3.zip
+          zip -r grid_all_v3.zip grid_all_v3
 
       # 仍然保留 artifact（可选）
       - name: Upload artifact
