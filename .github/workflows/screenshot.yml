@@ -1,0 +1,50 @@
+name: screenshots
+
+on:
+  workflow_dispatch:
+    inputs:
+      url:
+        description: "Target URL"
+        required: true
+        default: "http://154.48.226.95:802/#/"
+      countries:
+        description: "Countries (comma separated)"
+        required: false
+        default: "US,UK,DE,FR,IT,ES,CA,JP"
+  schedule:
+    - cron: "0 2 * * *"   # 每天 UTC 02:00 自动跑一次（不需要可删除这段）
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install dependencies
+        run: |
+          npm i
+          npx playwright install --with-deps chromium
+
+      - name: Run screenshots
+        env:
+          WIDTH: "1440"
+          HEIGHT: "3200"
+          DPR: "2"
+          COUNTRIES: ${{ inputs.countries }}
+        run: |
+          node ./multi_country_grid_4x5_v3.mjs "${{ inputs.url }}" "grid_all_v3"
+          tar -czf grid_all_v3.tar.gz grid_all_v3
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: grid_all_v3
+          path: grid_all_v3.tar.gz
