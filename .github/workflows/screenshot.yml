@@ -25,7 +25,7 @@ jobs:
     env:
       WIDTH: "1440"
       HEIGHT: "3200"
-      DPR: "4"
+      DPR: "3"
       URL: ${{ github.event.inputs.url || 'http://154.48.226.95:802/#/' }}
       COUNTRIES: ${{ github.event.inputs.countries || 'US,UK,DE,FR,IT,ES,CA,JP' }}
 
