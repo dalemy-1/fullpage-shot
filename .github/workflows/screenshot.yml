@@ -54,7 +54,8 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: grid_all_v3
-          path: grid_all_v3.tar.gz
+          path: grid_all_v3.zip
+
 
       # 关键：发布到 Releases/latest，形成固定下载链接
       - name: Create/Update Release (latest)
@@ -64,5 +65,6 @@ jobs:
           name: Latest build
           allowUpdates: true
           replacesArtifacts: true
-          artifacts: "grid_all_v3.tar.gz"
+          artifacts: "grid_all_v3.zip"
           token: ${{ secrets.GITHUB_TOKEN }}
+
