@@ -64,6 +64,7 @@ jobs:
           path: grid_all_v3.zip
 
 
+
       # 关键：发布到 Releases/latest，形成固定下载链接
       - name: Create/Update Release (latest)
         uses: ncipollo/release-action@v1
@@ -74,4 +75,5 @@ jobs:
           replacesArtifacts: true
           artifacts: "grid_all_v3.zip"
           token: ${{ secrets.GITHUB_TOKEN }}
+
 
