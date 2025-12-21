@@ -7,7 +7,8 @@ if (!url) {
   console.log('用法：node multi_country_grid_4x5_v4.mjs "<URL>" [输出目录]');
   process.exit(1);
 }
-const ROOT_OUT = (process.argv[3] || "grid_all_v3").trim();
+
+const ROOT_OUT = (process.argv[3] || "grid_all").trim();
 if (!fs.existsSync(ROOT_OUT)) fs.mkdirSync(ROOT_OUT, { recursive: true });
 
 // 默认所有国家；可用环境变量覆盖：$env:COUNTRIES="UK,DE,FR"
@@ -29,6 +30,10 @@ const WAIT_AFTER_GOTO_MS = Number(process.env.WAIT_AFTER_GOTO_MS || 5000);
 const WAIT_AFTER_SCROLL_MS = Number(process.env.WAIT_AFTER_SCROLL_MS || 1600);
 const WAIT_AFTER_SWITCH_MS = Number(process.env.WAIT_AFTER_SWITCH_MS || 2500);
 
+// 新增：关键超时/重试（Actions 更稳）
+const ITEM_VISIBLE_TIMEOUT_MS = Number(process.env.ITEM_VISIBLE_TIMEOUT_MS || 120000); // 等商品出现
+const SWITCH_RETRIES = Number(process.env.SWITCH_RETRIES || 3); // 切国家重试次数
+
 const MAX_SCROLL_ROUNDS = Number(process.env.MAX_SCROLL_ROUNDS || 260);
 const STABLE_ROUNDS_TO_STOP = Number(process.env.STABLE_ROUNDS_TO_STOP || 7);
 const ENSURE_ROUNDS = Number(process.env.ENSURE_ROUNDS || 40);
@@ -37,11 +42,25 @@ function ensureDir(p) {
   if (!fs.existsSync(p)) fs.mkdirSync(p, { recursive: true });
 }
 
-const browser = await chromium.launch({ channel: "chrome", headless: true });
+async function safeShot(filePath) {
+  try {
+    ensureDir(path.dirname(filePath));
+    await page.screenshot({ path: filePath, fullPage: true });
+  } catch {}
+}
+
+const browser = await chromium.launch({
+  channel: "chrome",
+  headless: true,
+  // 一些环境下能稍微提升稳定性（可选）
+  args: ["--disable-dev-shm-usage"],
+});
+
 const context = await browser.newContext({
   viewport: { width: WIDTH, height: BASE_HEIGHT },
   deviceScaleFactor: DPR,
 });
+
 const page = await context.newPage();
 
 await page.goto(url, { waitUntil: "domcontentloaded", timeout: 120000 });
@@ -84,10 +103,7 @@ async function applyHideHeaderFooter() {
     }
 
     const productAny = document.querySelector(itemSel);
-    const productRoot =
-      productAny?.closest(".product-list") ||
-      productAny?.parentElement ||
-      null;
+    const productRoot = productAny?.closest(".product-list") || productAny?.parentElement || null;
 
     function isVisible(el) {
       if (!el) return false;
@@ -102,8 +118,6 @@ async function applyHideHeaderFooter() {
       return productRoot.contains(el);
     }
 
-    let hidden = 0;
-
     for (const el of Array.from(document.querySelectorAll("*"))) {
       if (!(el instanceof HTMLElement)) continue;
       if (!isVisible(el)) continue;
@@ -116,19 +130,13 @@ async function applyHideHeaderFooter() {
       if (insideProduct(el)) continue;
 
       const r = el.getBoundingClientRect();
-
-      // 过滤很小的元素（避免误伤小图标）
       if (r.height < 40 || r.width < 200) continue;
 
-      // 常见：顶部/底部导航条、浮层遮罩等
       el.setAttribute("data-shot-hidden", "1");
       el.style.visibility = "hidden";
-      // 如果你遇到“仍然占位挡住商品”的情况，可以改成 display:none
+      // 如遇到“仍然占位挡住商品”，可改成 display:none
       // el.style.display = "none";
-      hidden += 1;
     }
-
-    return hidden;
   }, { itemSel: ITEM_SEL });
 
   await page.waitForTimeout(400);
@@ -147,18 +155,13 @@ async function clearHideHeaderFooter() {
 
 // ---------- 国家切换：打开 Location 弹窗并选择国家 ----------
 async function isLocationVisible() {
-  return await page
-    .getByText("Location", { exact: true })
-    .first()
-    .isVisible()
-    .catch(() => false);
+  return await page.getByText("Location", { exact: true }).first().isVisible().catch(() => false);
 }
 
 async function openLocationModal() {
   await page.evaluate(() => window.scrollTo(0, 0));
   await page.waitForTimeout(500);
 
-  // 优先：在左上角区域找“US/UK/DE...”并点击（比坐标更稳）
   const clicked = await page.evaluate((codes) => {
     function isVisible(el) {
       if (!el) return false;
@@ -188,11 +191,13 @@ async function openLocationModal() {
   }, ALL_CODES);
 
   if (!clicked) {
-    // 兜底：左上角扫描点击，直到弹窗出现
     for (let y = 20; y <= 110; y += 15) {
       for (let x = 20; x <= 240; x += 20) {
+        // eslint-disable-next-line no-await-in-loop
         await page.mouse.click(x, y).catch(() => {});
+        // eslint-disable-next-line no-await-in-loop
         if (await isLocationVisible()) return;
+        // eslint-disable-next-line no-await-in-loop
         await page.waitForTimeout(120);
       }
     }
@@ -243,29 +248,60 @@ async function chooseCountryInModal(code) {
   await page.waitForTimeout(WAIT_AFTER_SWITCH_MS);
 }
 
+// 等商品出现；如果明显为空态，则返回 empty=true
+async function waitItemsOrEmpty() {
+  const first = page.locator(ITEM_SEL).first();
+
+  try {
+    await first.waitFor({ state: "visible", timeout: ITEM_VISIBLE_TIMEOUT_MS });
+    return { ok: true, empty: false };
+  } catch {
+    // 典型空态（尽量宽松匹配）
+    const empty =
+      (await page.locator(".van-empty, .empty, [class*='empty']").first().isVisible().catch(() => false)) || false;
+
+    const count = await page.locator(ITEM_SEL).count().catch(() => 0);
+    if (empty || count === 0) return { ok: true, empty: true };
+
+    return { ok: false, empty: false };
+  }
+}
+
 async function switchCountry(code) {
   // 切换前保证页头不被隐藏（避免按钮点不到）
   await clearHideHeaderFooter();
   await page.evaluate(() => window.scrollTo(0, 0));
   await page.waitForTimeout(700);
 
-  for (let attempt = 1; attempt <= 2; attempt++) {
+  for (let attempt = 1; attempt <= SWITCH_RETRIES; attempt++) {
     try {
       await openLocationModal();
       await chooseCountryInModal(code);
-      await page.waitForSelector(ITEM_SEL, { timeout: 60000 });
-      return;
+
+      const st = await waitItemsOrEmpty();
+      if (st.ok) {
+        if (st.empty) console.log(`[${code}] 提示：该国家可能暂无商品（将跳过截图）`);
+        return st; // {ok:true, empty:...}
+      }
+
+      throw new Error(`[${code}] 切换后仍未出现商品卡片（可能接口慢/异常）`);
     } catch (e) {
-      if (attempt === 2) throw e;
+      if (attempt === SWITCH_RETRIES) throw e;
+
       await page.keyboard.press("Escape").catch(() => {});
       await page.waitForTimeout(800);
+      await page.reload({ waitUntil: "domcontentloaded" }).catch(() => {});
+      await page.waitForTimeout(1200);
     }
   }
+
+  return { ok: false, empty: false };
 }
 
 // ---------- 加载全量商品（尽量） ----------
 async function loadAllItemsBestEffort() {
-  await page.waitForSelector(ITEM_SEL, { timeout: 60000 });
+  // 用更长的超时，避免慢国家偶发失败
+  await page.waitForSelector(ITEM_SEL, { timeout: ITEM_VISIBLE_TIMEOUT_MS });
 
   let stable = 0;
   let lastCount = -1;
@@ -375,6 +411,7 @@ async function captureCountry(code) {
   await loadAllItemsBestEffort();
   let total = await page.locator(ITEM_SEL).count();
   console.log(`[${code}] 商品数量: ${total}`);
+
   if (!total) {
     await clearHideHeaderFooter();
     return;
@@ -438,11 +475,30 @@ async function captureCountry(code) {
   await page.waitForTimeout(500);
 }
 
-// ---------- 主流程：逐国家切换 + 截图 ----------
+// ---------- 主流程：逐国家切换 + 截图（单国家失败不影响整体） ----------
 for (const code of countries) {
   console.log(`\n=== 切换国家：${code} ===`);
-  await switchCountry(code);
-  await captureCountry(code);
+
+  try {
+    const st = await switchCountry(code);
+
+    // 空态直接跳过（不截图）
+    const cnt = await page.locator(ITEM_SEL).count().catch(() => 0);
+    if (st?.empty || cnt === 0) {
+      console.log(`[${code}] 0 商品或空态，跳过。`);
+      continue;
+    }
+
+    await captureCountry(code);
+  } catch (e) {
+    console.log(`[${code}] 失败：`, e?.message || e);
+
+    // 留一张失败现场图，便于排查
+    await safeShot(path.join(ROOT_OUT, "_errors", `${code}_switch.png`));
+
+    // 继续下一个国家，不让脚本退出 1
+    continue;
+  }
 }
 
 await browser.close();
